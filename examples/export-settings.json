@@ -1,0 +1,20 @@
+{
+  "package": "vehicle",
+  "role": "server",
+  "application": "vehicle_service",
+  "application_id": "0x1001",
+  "unicast": "127.0.0.1",
+  "transport": "udp",
+  "port": 30509,
+  "service_id": "0x1234",
+  "instance_id": "0x0001",
+  "instance_name": "vehicle.VehicleService",
+  "major": 1,
+  "minor": 0,
+  "members": {
+    "SetSpeed": {"id": 1},
+    "SpeedChanged": {"id": "0x8001", "eventgroups": [1]},
+    "CurrentSpeed": {"getter_id": 2, "notifier_id": "0x8002", "eventgroups": [1]}
+  },
+  "type_mapping": {}
+}
