@@ -4,3 +4,6 @@
 /frontend/node_modules/
 /frontend/dist/
 /.legacy/
+.env
+.env.*
+!.env.example

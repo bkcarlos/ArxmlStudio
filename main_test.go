@@ -12,6 +12,9 @@ import (
 )
 
 func TestEmbeddedAssets(t *testing.T) {
+	if !hasUI {
+		t.Skip("headless binary intentionally excludes UI")
+	}
 	for _, path := range []string{"/", "/examples/vehicle-v1.arxml", "/health"} {
 		r := httptest.NewRequest("GET", "http://127.0.0.1:8765"+path, nil)
 		w := httptest.NewRecorder()

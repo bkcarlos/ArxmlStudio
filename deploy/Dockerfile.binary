@@ -1,0 +1,7 @@
+FROM scratch
+COPY arxml-server /arxml-server
+USER 65532:65532
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["/arxml-server", "--healthcheck", "http://127.0.0.1:8080/health"]
+ENTRYPOINT ["/arxml-server"]
+CMD ["--api-only", "--listen", "0.0.0.0:8080"]

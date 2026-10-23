@@ -2,6 +2,17 @@
 
 本地 ARXML 服务浏览、语义对比、vsomeip + CommonAPI 配置导出工具。后端 Go，前端 Vue 3 + TypeScript + Vite。前端资源、Vue 运行库和演示 ARXML 通过 `go:embed` 编入一个可执行文件，运行时无需 Python、Node、Go 或外部静态文件。
 
+## Docker / Linux 后端服务
+
+支持无前端的独立 HTTP API 服务，提供 Dockerfile、Compose、Bearer Token 鉴权、CORS 配置和健康检查。完整部署及接口示例见 [后端服务文档](docs/backend.md)。
+
+```sh
+./scripts/build-server.sh
+./dist/arxml-server --listen 127.0.0.1:8080
+```
+
+该构建仅需 Go；使用 `-tags headless` 运行测试和编译时也无需前端资源。Docker 部署请先按文档设置 `.env` 中的随机访问令牌。
+
 ## 直接运行
 
 预编译安装包见 [GitHub Releases](https://github.com/bkcarlos/ArxmlStudio/releases)。根据操作系统和 CPU 架构下载并解压，可使用同一 Release 中的 `SHA256SUMS.txt` 校验安装包。
@@ -100,7 +111,13 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o d
 ## 生成 Release 安装包
 
 ```sh
-./scripts/release.sh v0.2.0
+./scripts/release.sh v0.3.0
 ```
 
-构建 macOS arm64/amd64、Linux arm64/amd64、Windows amd64 安装包，附带使用说明、示例和 Vue 第三方许可，输出至 `dist/releases/v0.2.0/`。安装包的 SHA-256 校验值汇总在 `SHA256SUMS.txt`。脚本只构建和打包，不自动发布。
+分别构建完整程序 `arxml-studio` 和纯后端 `arxml-server` 的 macOS arm64/amd64、Linux arm64/amd64、Windows amd64 安装包（共 10 个），附带使用说明、示例和 Vue 第三方许可，输出至 `dist/releases/v0.3.0/`。安装包的 SHA-256 校验值汇总在 `SHA256SUMS.txt`。脚本只构建和打包，不自动发布。
+
+## GitHub Actions 自动发布
+
+`main` 分支和 Pull Request 自动运行前端构建、Go 测试、竞态检测及静态检查。推送 `v*.*.*` 标签后，Actions 构建两种程序的全部安装包、校验清单并自动发布 GitHub Release。无需配置个人访问令牌，发布 job 使用仓库自带的 `GITHUB_TOKEN`，仅该 job 拥有 `contents: write`。
+
+后续版本请先更新 `main.go`、前端 package/package-lock 版本、页面版本显示，以及 `docs/releases/vX.Y.Z.md`，提交后推送相同版本的标签。发布脚本会检查前端版本与标签一致；已正式发布的版本不会被自动覆盖。工作流可从仓库 Actions 页面查看，失败的草稿发布可重跑。

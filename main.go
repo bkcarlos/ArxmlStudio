@@ -3,25 +3,23 @@ package main
 import (
 	"arxml-studio/internal/arxml"
 	"context"
-	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
-//go:embed all:frontend/dist
-var assets embed.FS
-var version = "0.2.0"
+var version = "0.3.0"
 
 type inputFile struct {
 	Name string `json:"name"`
@@ -56,17 +54,19 @@ func api(w http.ResponseWriter, r *http.Request) {
 		reply(w, 405, map[string]string{"error": "仅支持 POST"})
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
-		reply(w, 403, map[string]string{"error": "不接受跨站请求"})
-		return
-	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, arxml.MaxBytes*3)
 	defer r.Body.Close()
 	var req request
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
 	if e := decoder.Decode(&req); e != nil {
-		reply(w, 400, map[string]string{"error": "无效的 JSON 请求或请求超过大小限制"})
+		var tooLarge *http.MaxBytesError
+		if errors.As(e, &tooLarge) {
+			reply(w, 413, map[string]string{"error": "请求超过 60 MiB 限制"})
+		} else {
+			reply(w, 400, map[string]string{"error": "无效的 JSON 请求"})
+		}
 		return
 	}
 	if e := decoder.Decode(new(any)); e != io.EOF {
@@ -87,7 +87,7 @@ func api(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			result = arxml.Compare(a, b)
 		}
-	case "/api/settings", "/api/export":
+	case "/api/settings", "/api/export", "/api/export/zip":
 		var doc *arxml.Document
 		doc, err = req.File.parse()
 		if err == nil {
@@ -108,32 +108,19 @@ func api(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	reply(w, 200, result)
-}
-func handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/", api)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, map[string]string{"status": "ok", "version": version})
-	})
-	root, err := fs.Sub(assets, "frontend/dist")
-	if err != nil {
-		panic(err)
-	}
-	mux.Handle("/", http.FileServer(http.FS(root)))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, e := net.SplitHostPort(r.Host)
-		if e != nil {
-			host = r.Host
-		}
-		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-			reply(w, 403, map[string]string{"error": "仅接受本机访问"})
+	if r.URL.Path == "/api/export/zip" {
+		bundle := result.(arxml.Bundle)
+		data, err := base64.StdEncoding.DecodeString(bundle.Data)
+		if err != nil {
+			reply(w, 500, map[string]string{"error": "无法编码导出文件"})
 			return
 		}
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
-		mux.ServeHTTP(w, r)
-	})
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", bundle.Filename))
+		_, _ = w.Write(data)
+		return
+	}
+	reply(w, 200, result)
 }
 func readFile(path string) (*arxml.Document, error) {
 	f, e := os.Open(path)
@@ -148,6 +135,11 @@ func readFile(path string) (*arxml.Document, error) {
 	return arxml.Parse(data, filepath.Base(path))
 }
 func run() error {
+	listen := flag.String("listen", os.Getenv("ARXML_LISTEN"), "监听地址，例如 0.0.0.0:8080；默认 127.0.0.1:8765")
+	apiOnly := flag.Bool("api-only", !hasUI, "仅提供 HTTP API")
+	origins := flag.String("cors-origins", os.Getenv("ARXML_CORS_ORIGINS"), "允许的前端 Origin，逗号分隔")
+	concurrency := flag.Int("max-concurrent", 4, "最大并发 API 请求数")
+	healthcheck := flag.String("healthcheck", "", "探测健康检查 URL 后退出")
 	port := flag.Int("port", 8765, "本地 HTTP 端口（0 为自动分配）")
 	exportPath := flag.String("export", "", "将 ARXML 导出为 JSON")
 	comparePath := flag.String("compare", "", "比较的基准 ARXML（与 --with 一起使用）")
@@ -160,6 +152,18 @@ func run() error {
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("不支持的位置参数：%s", strings.Join(flag.Args(), " "))
+	}
+	if *healthcheck != "" {
+		client := &http.Client{Timeout: 3 * time.Second}
+		response, err := client.Get(*healthcheck)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 {
+			return fmt.Errorf("healthcheck: HTTP %d", response.StatusCode)
+		}
+		return nil
 	}
 	if *showVersion {
 		fmt.Println(version)
@@ -236,23 +240,36 @@ func run() error {
 	if *withPath != "" || *settings != "" || *service != "" || *output != "" {
 		return fmt.Errorf("请指定 --export、--compare 或 --bundle")
 	}
-	listener, e := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
+	address := *listen
+	if address == "" {
+		address = fmt.Sprintf("127.0.0.1:%d", *port)
+	}
+	cfg := serverConfig{Address: address, APIOnly: *apiOnly, Token: os.Getenv("ARXML_API_TOKEN"), Origins: strings.Split(*origins, ","), MaxConcurrent: *concurrency}
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	listener, e := net.Listen("tcp", address)
 	if e != nil {
 		return e
 	}
-	server := &http.Server{Handler: handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	server := &http.Server{Handler: newHandler(cfg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		if err := server.Shutdown(shutdown); err != nil {
+			_ = server.Close()
+		}
 	}()
-	fmt.Printf("ARXML Studio %s · Go + Vue\nhttp://%s\n按 Ctrl+C 退出\n", version, listener.Addr())
+	fmt.Printf("ARXML Studio %s · HTTP service\nhttp://%s\n按 Ctrl+C 退出\n", version, listener.Addr())
 	if e = server.Serve(listener); e != http.ErrServerClosed {
 		return e
 	}
+	<-stopped
 	return nil
 }
 func main() {

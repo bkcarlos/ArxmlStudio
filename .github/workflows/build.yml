@@ -1,0 +1,91 @@
+name: Build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Test main and pull requests
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+          go test -race ./...
+          go test -tags headless -race ./...
+          go vet ./...
+          go vet -tags headless ./...
+      - name: Build release packages
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          ./scripts/release.sh "$RELEASE_VERSION"
+          cd "dist/releases/$RELEASE_VERSION"
+          sha256sum -c SHA256SUMS.txt
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 11
+          "./arxml-server_${RELEASE_VERSION}_linux_amd64/arxml-server" --version
+          "./arxml-studio_${RELEASE_VERSION}_linux_amd64/arxml-studio" --version
+      - uses: actions/upload-artifact@v7.0.2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: release-assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          path: |
+            dist/releases/${{ github.ref_name }}/*.tar.gz
+            dist/releases/${{ github.ref_name }}/*.zip
+            dist/releases/${{ github.ref_name }}/SHA256SUMS.txt
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Verify and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -f "docs/releases/$RELEASE_VERSION.md"
+          (cd release-assets && sha256sum -c SHA256SUMS.txt)
+          if gh release view "$RELEASE_VERSION" --json isDraft > /tmp/release-state.json 2>/dev/null; then
+            test "$(jq -r '.isDraft' /tmp/release-state.json)" = true || { echo 'Release is already published; refusing to replace it.'; exit 1; }
+            gh release upload "$RELEASE_VERSION" --clobber release-assets/*.tar.gz release-assets/*.zip release-assets/SHA256SUMS.txt
+          else
+            gh release create "$RELEASE_VERSION" --verify-tag --draft \
+              --title "ARXML Studio $RELEASE_VERSION" --notes-file "docs/releases/$RELEASE_VERSION.md" \
+              release-assets/*.tar.gz release-assets/*.zip release-assets/SHA256SUMS.txt
+          fi
+          gh release edit "$RELEASE_VERSION" --draft=false --latest
